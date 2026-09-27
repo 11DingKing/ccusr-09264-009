@@ -146,5 +146,41 @@ class AuditEntry:
     detail: dict = field(default_factory=dict)
 
 
+@dataclass
+class Release:
+    """一次发布：已签发通过的评审包等待发布委员会按职责确认。"""
+
+    release_id: str
+    package_id: str
+    institution_id: str
+    status: str                    # ReleaseStatus
+    created_by: str
+    created_at: str
+    released_at: Optional[str]
+
+
+@dataclass
+class ReleaseConfirmation:
+    """一条职责确认：覆盖发布法定人数职责集合中的某一个角色。"""
+
+    confirmation_id: str
+    release_id: str
+    user_id: str
+    role: str                      # 该确认覆盖的职责（Role 取值）
+    via: str                       # ConfirmationVia：本人持有或授权替代
+    created_at: str
+
+
+@dataclass
+class ReleaseDelegation:
+    """替代确认人授权：允许某用户代为确认指定职责（授权范围）。"""
+
+    delegation_id: str
+    delegate_user_id: str
+    role: str                      # 被授权替代的职责（Role 取值）
+    created_by: str
+    created_at: str
+
+
 def asdict(obj) -> dict:
     return dataclasses.asdict(obj)

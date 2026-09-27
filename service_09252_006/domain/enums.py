@@ -49,3 +49,13 @@ class Decision(str, Enum):
     APPROVED = "approved"
     NEEDS_REVISION = "needs_revision"
     REJECTED = "rejected"
+
+
+class ReleaseStatus(str, Enum):
+    PENDING = "pending"      # 等待发布委员会确认达到法定人数
+    RELEASED = "released"    # 法定人数齐备，已发布
+
+
+class ConfirmationVia(str, Enum):
+    DIRECT = "direct"          # 确认人本人持有该职责
+    SUBSTITUTE = "substitute"  # 替代确认人，在授权范围内代为确认

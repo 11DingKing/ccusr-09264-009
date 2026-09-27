@@ -394,6 +394,76 @@ class ApiHandler(BaseHTTPRequestHandler):
             ),
         )
 
+    # ----------------------------------------------------- 发布法定人数
+    def define_committee(self) -> None:
+        actor = self._actor()
+        body = self._read_json()
+        self._send_json(
+            200,
+            self.services.releases.define_committee(
+                actor,
+                roles=body.get("roles") or [],
+                idempotency_key=self._idempotency_key(),
+            ),
+        )
+
+    def get_committee(self) -> None:
+        actor = self._actor()
+        self._send_json(200, self.services.releases.get_committee(actor))
+
+    def delegate_substitute(self) -> None:
+        actor = self._actor()
+        body = self._read_json()
+        self._send_json(
+            201,
+            self.services.releases.delegate_substitute(
+                actor,
+                delegate_user_id=body["user_id"],
+                role=body["role"],
+                idempotency_key=self._idempotency_key(),
+            ),
+        )
+
+    def create_release(self) -> None:
+        actor = self._actor()
+        body = self._read_json()
+        self._send_json(
+            201,
+            self.services.releases.create_release(
+                actor,
+                package_id=body["package_id"],
+                idempotency_key=self._idempotency_key(),
+            ),
+        )
+
+    def get_release(self, release_id: str) -> None:
+        actor = self._actor()
+        self._send_json(200, self.services.releases.get_release(actor, release_id))
+
+    def confirm_release(self, release_id: str) -> None:
+        actor = self._actor()
+        body = self._read_json()
+        self._send_json(
+            201,
+            self.services.releases.confirm_release(
+                actor,
+                release_id=release_id,
+                role=body["role"],
+                idempotency_key=self._idempotency_key(),
+            ),
+        )
+
+    def publish_release(self, release_id: str) -> None:
+        actor = self._actor()
+        self._send_json(
+            200,
+            self.services.releases.publish_release(
+                actor,
+                release_id=release_id,
+                idempotency_key=self._idempotency_key(),
+            ),
+        )
+
 
 # 路由表：方法 -> [(路径模式, 处理方法名)]
 def _routes() -> dict[str, list[tuple[str, str]]]:
@@ -413,6 +483,11 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
         ("/v1/requests/{request_id}/respond", "respond_request"),
         ("/v1/requests/{request_id}/objections", "create_objection"),
         ("/v1/requests/{request_id}/verdict", "submit_verdict"),
+        ("/v1/committee/roles", "define_committee"),
+        ("/v1/committee/delegations", "delegate_substitute"),
+        ("/v1/releases", "create_release"),
+        ("/v1/releases/{release_id}/confirm", "confirm_release"),
+        ("/v1/releases/{release_id}/publish", "publish_release"),
     ]
     get = [
         ("/v1/materials/{material_id}", "get_material"),
@@ -424,6 +499,8 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
             "/v1/packages/{package_id}/entries/{version_id}/content",
             "download_entry",
         ),
+        ("/v1/committee/roles", "get_committee"),
+        ("/v1/releases/{release_id}", "get_release"),
     ]
     return {"POST": post, "GET": get}
 

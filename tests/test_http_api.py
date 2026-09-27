@@ -7,6 +7,8 @@ import urllib.request
 
 from service_09252_006.api.http_api import HttpApiServer
 from service_09252_006.application.container import ApplicationContext
+from service_09252_006.domain.enums import Decision, Role
+from tests.flow import complete_review, seal_new_package
 from tests.support import Harness
 
 
@@ -196,6 +198,105 @@ class HttpApiTests(unittest.TestCase):
         status, body = ApiClient(self.base).request("GET", "/healthz")
         self.assertEqual(status, 200)
         self.assertTrue(body["ok"])
+
+    def test_release_quorum_over_http(self) -> None:
+        admin = self._create_user(
+            "admin-a", ["institution_admin"], "inst-a", "tok-admin"
+        )
+        authority = self._create_user(
+            "auth", ["quality_authority"], None, "tok-auth"
+        )
+        auditor = self._create_user("aud-1", ["auditor"], None, "tok-aud")
+        clerk = self._create_user("clerk", [], None, "tok-clerk")
+
+        # 用服务层准备一个已签发通过的评审包
+        admin_user = self.h.repo.get_user("admin-a")
+        auth_user = self.h.repo.get_user("auth")
+        reviewer = self.h.user("rev-1", Role.REVIEWER, institution_id="inst-ext")
+        sealed = seal_new_package(self.h, admin_user)
+        complete_review(self.h, auth_user, reviewer, sealed.package_id)
+        self.h.ctx.reviews.issue_decision(
+            auth_user,
+            package_id=sealed.package_id,
+            decision=Decision.APPROVED.value,
+        )
+
+        # 定义发布委员会职责集合（仅权威机构）
+        status, body = admin.request(
+            "POST", "/v1/committee/roles", {"roles": ["auditor"]}
+        )
+        self.assertEqual(status, 403)
+        status, body = authority.request(
+            "POST", "/v1/committee/roles",
+            {"roles": ["quality_authority", "institution_admin", "auditor"]},
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            body["required_roles"],
+            ["auditor", "institution_admin", "quality_authority"],
+        )
+
+        # 创建发布：初始即列出全部缺位角色
+        status, rel = authority.request(
+            "POST", "/v1/releases", {"package_id": sealed.package_id}
+        )
+        self.assertEqual(status, 201, rel)
+        rid = rel["release_id"]
+        self.assertEqual(rel["status"], "pending")
+        self.assertEqual(
+            rel["missing_roles"],
+            ["auditor", "institution_admin", "quality_authority"],
+        )
+
+        # 法定人数不足：发布接口返回缺少的角色
+        status, body = authority.request("POST", f"/v1/releases/{rid}/publish", {})
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"]["code"], "conflict")
+        self.assertEqual(
+            body["error"]["details"]["missing_roles"],
+            ["auditor", "institution_admin", "quality_authority"],
+        )
+
+        # 授权替代确认人（仅 auditor 职责）；越权确认被拒
+        status, delegation = authority.request(
+            "POST", "/v1/committee/delegations",
+            {"user_id": "clerk", "role": "auditor"},
+        )
+        self.assertEqual(status, 201, delegation)
+        status, body = clerk.request(
+            "POST", f"/v1/releases/{rid}/confirm", {"role": "institution_admin"}
+        )
+        self.assertEqual(status, 403)
+        status, conf = clerk.request(
+            "POST", f"/v1/releases/{rid}/confirm", {"role": "auditor"}
+        )
+        self.assertEqual(status, 201, conf)
+        self.assertEqual(conf["via"], "substitute")
+
+        # 本人持有角色的确认
+        status, conf = authority.request(
+            "POST", f"/v1/releases/{rid}/confirm", {"role": "quality_authority"}
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(conf["via"], "direct")
+        status, conf = admin.request(
+            "POST", f"/v1/releases/{rid}/confirm", {"role": "institution_admin"}
+        )
+        self.assertEqual(status, 201)
+
+        # 查询：法定人数齐备，缺位角色为空
+        status, view = auditor.request("GET", f"/v1/releases/{rid}")
+        self.assertEqual(status, 200)
+        self.assertEqual(view["missing_roles"], [])
+        self.assertTrue(view["quorum_met"])
+
+        # 发布成功，响应中缺位角色为空
+        status, published = authority.request(
+            "POST", f"/v1/releases/{rid}/publish", {}
+        )
+        self.assertEqual(status, 200, published)
+        self.assertEqual(published["status"], "released")
+        self.assertEqual(published["missing_roles"], [])
 
 
 if __name__ == "__main__":

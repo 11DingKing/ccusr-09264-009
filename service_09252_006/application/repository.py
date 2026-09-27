@@ -16,6 +16,9 @@ from ..domain.models import (
     MaterialVersion,
     Objection,
     PackageEntry,
+    Release,
+    ReleaseConfirmation,
+    ReleaseDelegation,
     ReviewPackage,
     ReviewRequest,
     User,
@@ -148,3 +151,49 @@ class Repository(abc.ABC):
     def list_audit(
         self, package_id: str | None = None, limit: int = 200
     ) -> list[AuditEntry]: ...
+
+    # ---- 发布法定人数 ----
+    @abc.abstractmethod
+    def replace_committee_roles(self, roles: list[str]) -> None:
+        """整体替换发布委员会的职责集合（法定人数按此统计）。"""
+
+    @abc.abstractmethod
+    def list_committee_roles(self) -> list[str]: ...
+
+    @abc.abstractmethod
+    def insert_delegation(self, delegation: ReleaseDelegation) -> None: ...
+
+    @abc.abstractmethod
+    def find_delegation(
+        self, delegate_user_id: str, role: str
+    ) -> ReleaseDelegation | None: ...
+
+    @abc.abstractmethod
+    def insert_release(self, release: Release) -> None: ...
+
+    @abc.abstractmethod
+    def get_release(self, release_id: str) -> Release | None: ...
+
+    @abc.abstractmethod
+    def get_release_by_package(self, package_id: str) -> Release | None: ...
+
+    @abc.abstractmethod
+    def transition_release_status(
+        self,
+        release_id: str,
+        expected_status: str,
+        new_status: str,
+        **fields,
+    ) -> bool:
+        """条件更新；状态不再是 expected_status 时返回 False（并发冲突）。"""
+
+    @abc.abstractmethod
+    def insert_confirmation(self, confirmation: ReleaseConfirmation) -> None: ...
+
+    @abc.abstractmethod
+    def find_confirmation(
+        self, release_id: str, role: str
+    ) -> ReleaseConfirmation | None: ...
+
+    @abc.abstractmethod
+    def list_confirmations(self, release_id: str) -> list[ReleaseConfirmation]: ...

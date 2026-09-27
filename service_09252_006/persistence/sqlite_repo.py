@@ -22,12 +22,180 @@ from ..domain.models import (
     MaterialVersion,
     Objection,
     PackageEntry,
+    Release,
+    ReleaseConfirmation,
+    ReleaseDelegation,
     ReviewPackage,
     ReviewRequest,
     User,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+_SCHEMA_V1 = """
+    CREATE TABLE IF NOT EXISTS users (
+        user_id        TEXT PRIMARY KEY,
+        institution_id TEXT,
+        roles_json     TEXT NOT NULL,
+        display_name   TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS blobs (
+        sha256     TEXT PRIMARY KEY,
+        data       BLOB NOT NULL,
+        media_type TEXT NOT NULL,
+        size       INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS materials (
+        material_id        TEXT PRIMARY KEY,
+        institution_id     TEXT NOT NULL,
+        kind               TEXT NOT NULL,
+        sensitivity        TEXT NOT NULL,
+        title              TEXT NOT NULL,
+        current_version_id TEXT,
+        withdrawn          INTEGER NOT NULL DEFAULT 0,
+        created_at         TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS versions (
+        version_id              TEXT PRIMARY KEY,
+        material_id             TEXT NOT NULL REFERENCES materials(material_id),
+        institution_id          TEXT NOT NULL,
+        sha256                  TEXT NOT NULL,
+        size                    INTEGER NOT NULL,
+        media_type              TEXT NOT NULL,
+        version_no              INTEGER NOT NULL,
+        supersedes_version_id   TEXT,
+        created_by              TEXT NOT NULL,
+        created_at              TEXT NOT NULL,
+        withdrawn               INTEGER NOT NULL DEFAULT 0,
+        withdrawn_at            TEXT,
+        UNIQUE(material_id, version_no)
+    );
+
+    CREATE TABLE IF NOT EXISTS packages (
+        package_id            TEXT PRIMARY KEY,
+        institution_id        TEXT NOT NULL,
+        title                 TEXT NOT NULL,
+        status                TEXT NOT NULL,
+        created_by            TEXT NOT NULL,
+        created_at            TEXT NOT NULL,
+        sealed_at             TEXT,
+        manifest_fingerprint  TEXT,
+        decided_at            TEXT,
+        decision              TEXT,
+        decision_note         TEXT,
+        review_fingerprint    TEXT,
+        supersedes_package_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS entries (
+        entry_id    TEXT PRIMARY KEY,
+        package_id  TEXT NOT NULL REFERENCES packages(package_id),
+        material_id TEXT NOT NULL,
+        version_id  TEXT NOT NULL REFERENCES versions(version_id),
+        sha256      TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        sensitivity TEXT NOT NULL,
+        added_at    TEXT NOT NULL,
+        UNIQUE(package_id, version_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS requests (
+        request_id       TEXT PRIMARY KEY,
+        package_id       TEXT NOT NULL REFERENCES packages(package_id),
+        institution_id   TEXT NOT NULL,
+        reviewer_id      TEXT NOT NULL,
+        status           TEXT NOT NULL,
+        assigned_by      TEXT NOT NULL,
+        assigned_at      TEXT NOT NULL,
+        responded_at     TEXT,
+        completed_at     TEXT,
+        verdict          TEXT,
+        comment          TEXT,
+        deadline_at_utc  TEXT,
+        deadline_timezone TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_requests_reviewer
+        ON requests(reviewer_id, status);
+    CREATE INDEX IF NOT EXISTS idx_requests_package ON requests(package_id);
+
+    CREATE TABLE IF NOT EXISTS objections (
+        objection_id  TEXT PRIMARY KEY,
+        request_id    TEXT NOT NULL REFERENCES requests(request_id),
+        package_id    TEXT NOT NULL REFERENCES packages(package_id),
+        institution_id TEXT NOT NULL,
+        reviewer_id   TEXT NOT NULL,
+        category      TEXT NOT NULL,
+        detail        TEXT NOT NULL,
+        created_at    TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+        audit_id       TEXT PRIMARY KEY,
+        package_id     TEXT,
+        institution_id TEXT,
+        actor_id       TEXT NOT NULL,
+        action         TEXT NOT NULL,
+        at             TEXT NOT NULL,
+        detail_json    TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS idempotency (
+        idempotency_key TEXT PRIMARY KEY,
+        result_json     TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS api_tokens (
+        token       TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL REFERENCES users(user_id),
+        created_at  TEXT NOT NULL
+    );
+
+    PRAGMA user_version = 1;
+"""
+
+# 发布法定人数：职责集合、替代确认人授权、发布与职责确认
+_SCHEMA_V2 = """
+    CREATE TABLE IF NOT EXISTS release_committee_roles (
+        role TEXT PRIMARY KEY
+    );
+
+    CREATE TABLE IF NOT EXISTS release_delegations (
+        delegation_id    TEXT PRIMARY KEY,
+        delegate_user_id TEXT NOT NULL,
+        role             TEXT NOT NULL,
+        created_by       TEXT NOT NULL,
+        created_at       TEXT NOT NULL,
+        UNIQUE(delegate_user_id, role)
+    );
+
+    CREATE TABLE IF NOT EXISTS releases (
+        release_id     TEXT PRIMARY KEY,
+        package_id     TEXT NOT NULL REFERENCES packages(package_id),
+        institution_id TEXT NOT NULL,
+        status         TEXT NOT NULL,
+        created_by     TEXT NOT NULL,
+        created_at     TEXT NOT NULL,
+        released_at    TEXT,
+        UNIQUE(package_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS release_confirmations (
+        confirmation_id TEXT PRIMARY KEY,
+        release_id      TEXT NOT NULL REFERENCES releases(release_id),
+        user_id         TEXT NOT NULL,
+        role            TEXT NOT NULL,
+        via             TEXT NOT NULL,
+        created_at      TEXT NOT NULL,
+        UNIQUE(release_id, role)
+    );
+
+    PRAGMA user_version = 2;
+"""
 
 
 class SqliteRepository(Repository):
@@ -52,133 +220,10 @@ class SqliteRepository(Repository):
         if version >= SCHEMA_VERSION:
             return
         # executescript 会自行提交事务；把 user_version 写入放在同一脚本
-        self._conn.executescript(
-            """
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id        TEXT PRIMARY KEY,
-                    institution_id TEXT,
-                    roles_json     TEXT NOT NULL,
-                    display_name   TEXT NOT NULL DEFAULT ''
-                );
-
-                CREATE TABLE IF NOT EXISTS blobs (
-                    sha256     TEXT PRIMARY KEY,
-                    data       BLOB NOT NULL,
-                    media_type TEXT NOT NULL,
-                    size       INTEGER NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS materials (
-                    material_id        TEXT PRIMARY KEY,
-                    institution_id     TEXT NOT NULL,
-                    kind               TEXT NOT NULL,
-                    sensitivity        TEXT NOT NULL,
-                    title              TEXT NOT NULL,
-                    current_version_id TEXT,
-                    withdrawn          INTEGER NOT NULL DEFAULT 0,
-                    created_at         TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS versions (
-                    version_id              TEXT PRIMARY KEY,
-                    material_id             TEXT NOT NULL REFERENCES materials(material_id),
-                    institution_id          TEXT NOT NULL,
-                    sha256                  TEXT NOT NULL,
-                    size                    INTEGER NOT NULL,
-                    media_type              TEXT NOT NULL,
-                    version_no              INTEGER NOT NULL,
-                    supersedes_version_id   TEXT,
-                    created_by              TEXT NOT NULL,
-                    created_at              TEXT NOT NULL,
-                    withdrawn               INTEGER NOT NULL DEFAULT 0,
-                    withdrawn_at            TEXT,
-                    UNIQUE(material_id, version_no)
-                );
-
-                CREATE TABLE IF NOT EXISTS packages (
-                    package_id            TEXT PRIMARY KEY,
-                    institution_id        TEXT NOT NULL,
-                    title                 TEXT NOT NULL,
-                    status                TEXT NOT NULL,
-                    created_by            TEXT NOT NULL,
-                    created_at            TEXT NOT NULL,
-                    sealed_at             TEXT,
-                    manifest_fingerprint  TEXT,
-                    decided_at            TEXT,
-                    decision              TEXT,
-                    decision_note         TEXT,
-                    review_fingerprint    TEXT,
-                    supersedes_package_id TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS entries (
-                    entry_id    TEXT PRIMARY KEY,
-                    package_id  TEXT NOT NULL REFERENCES packages(package_id),
-                    material_id TEXT NOT NULL,
-                    version_id  TEXT NOT NULL REFERENCES versions(version_id),
-                    sha256      TEXT NOT NULL,
-                    kind        TEXT NOT NULL,
-                    sensitivity TEXT NOT NULL,
-                    added_at    TEXT NOT NULL,
-                    UNIQUE(package_id, version_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS requests (
-                    request_id       TEXT PRIMARY KEY,
-                    package_id       TEXT NOT NULL REFERENCES packages(package_id),
-                    institution_id   TEXT NOT NULL,
-                    reviewer_id      TEXT NOT NULL,
-                    status           TEXT NOT NULL,
-                    assigned_by      TEXT NOT NULL,
-                    assigned_at      TEXT NOT NULL,
-                    responded_at     TEXT,
-                    completed_at     TEXT,
-                    verdict          TEXT,
-                    comment          TEXT,
-                    deadline_at_utc  TEXT,
-                    deadline_timezone TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_requests_reviewer
-                    ON requests(reviewer_id, status);
-                CREATE INDEX IF NOT EXISTS idx_requests_package ON requests(package_id);
-
-                CREATE TABLE IF NOT EXISTS objections (
-                    objection_id  TEXT PRIMARY KEY,
-                    request_id    TEXT NOT NULL REFERENCES requests(request_id),
-                    package_id    TEXT NOT NULL REFERENCES packages(package_id),
-                    institution_id TEXT NOT NULL,
-                    reviewer_id   TEXT NOT NULL,
-                    category      TEXT NOT NULL,
-                    detail        TEXT NOT NULL,
-                    created_at    TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS audit_log (
-                    audit_id       TEXT PRIMARY KEY,
-                    package_id     TEXT,
-                    institution_id TEXT,
-                    actor_id       TEXT NOT NULL,
-                    action         TEXT NOT NULL,
-                    at             TEXT NOT NULL,
-                    detail_json    TEXT NOT NULL DEFAULT '{}'
-                );
-
-                CREATE TABLE IF NOT EXISTS idempotency (
-                    idempotency_key TEXT PRIMARY KEY,
-                    result_json     TEXT NOT NULL,
-                    created_at      TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS api_tokens (
-                    token       TEXT PRIMARY KEY,
-                    user_id     TEXT NOT NULL REFERENCES users(user_id),
-                    created_at  TEXT NOT NULL
-                );
-
-                PRAGMA user_version = 1;
-            """
-        )
+        if version < 1:
+            self._conn.executescript(_SCHEMA_V1)
+        if version < 2:
+            self._conn.executescript(_SCHEMA_V2)
 
     @contextlib.contextmanager
     def _txn_direct(self) -> Iterator[None]:
@@ -667,6 +712,124 @@ class SqliteRepository(Repository):
             for r in rows
         ]
 
+    # ------------------------------------------------------- 发布法定人数
+    def replace_committee_roles(self, roles: list[str]) -> None:
+        self._conn.execute("DELETE FROM release_committee_roles")
+        self._conn.executemany(
+            "INSERT INTO release_committee_roles(role) VALUES(?)",
+            [(r,) for r in roles],
+        )
+
+    def list_committee_roles(self) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT role FROM release_committee_roles ORDER BY role"
+        ).fetchall()
+        return [r["role"] for r in rows]
+
+    def insert_delegation(self, delegation: ReleaseDelegation) -> None:
+        self._conn.execute(
+            "INSERT INTO release_delegations(delegation_id, delegate_user_id, role,"
+            " created_by, created_at) VALUES(?,?,?,?,?)",
+            (
+                delegation.delegation_id,
+                delegation.delegate_user_id,
+                delegation.role,
+                delegation.created_by,
+                delegation.created_at,
+            ),
+        )
+
+    def find_delegation(
+        self, delegate_user_id: str, role: str
+    ) -> ReleaseDelegation | None:
+        row = self._conn.execute(
+            "SELECT * FROM release_delegations"
+            " WHERE delegate_user_id = ? AND role = ?",
+            (delegate_user_id, role),
+        ).fetchone()
+        return None if row is None else _row_to_delegation(row)
+
+    def insert_release(self, release: Release) -> None:
+        self._conn.execute(
+            "INSERT INTO releases(release_id, package_id, institution_id, status,"
+            " created_by, created_at, released_at) VALUES(?,?,?,?,?,?,?)",
+            (
+                release.release_id,
+                release.package_id,
+                release.institution_id,
+                release.status,
+                release.created_by,
+                release.created_at,
+                release.released_at,
+            ),
+        )
+
+    def get_release(self, release_id: str) -> Release | None:
+        row = self._conn.execute(
+            "SELECT * FROM releases WHERE release_id = ?", (release_id,)
+        ).fetchone()
+        return None if row is None else _row_to_release(row)
+
+    def get_release_by_package(self, package_id: str) -> Release | None:
+        row = self._conn.execute(
+            "SELECT * FROM releases WHERE package_id = ?", (package_id,)
+        ).fetchone()
+        return None if row is None else _row_to_release(row)
+
+    def transition_release_status(
+        self,
+        release_id: str,
+        expected_status: str,
+        new_status: str,
+        **fields,
+    ) -> bool:
+        allowed = {"released_at"}
+        sets = ["status = ?"]
+        params: list = [new_status]
+        for key, value in fields.items():
+            if key not in allowed:
+                raise ValueError(f"不允许通过状态迁移更新字段: {key}")
+            sets.append(f"{key} = ?")
+            params.append(value)
+        params.extend([release_id, expected_status])
+        cur = self._conn.execute(
+            f"UPDATE releases SET {', '.join(sets)}"
+            " WHERE release_id = ? AND status = ?",
+            params,
+        )
+        return cur.rowcount == 1
+
+    def insert_confirmation(self, confirmation: ReleaseConfirmation) -> None:
+        self._conn.execute(
+            "INSERT INTO release_confirmations(confirmation_id, release_id, user_id,"
+            " role, via, created_at) VALUES(?,?,?,?,?,?)",
+            (
+                confirmation.confirmation_id,
+                confirmation.release_id,
+                confirmation.user_id,
+                confirmation.role,
+                confirmation.via,
+                confirmation.created_at,
+            ),
+        )
+
+    def find_confirmation(
+        self, release_id: str, role: str
+    ) -> ReleaseConfirmation | None:
+        row = self._conn.execute(
+            "SELECT * FROM release_confirmations WHERE release_id = ? AND role = ?",
+            (release_id, role),
+        ).fetchone()
+        return None if row is None else _row_to_confirmation(row)
+
+    def list_confirmations(self, release_id: str) -> list[ReleaseConfirmation]:
+        rows = self._conn.execute(
+            "SELECT * FROM release_confirmations WHERE release_id = ?"
+            " ORDER BY created_at",
+            (release_id,),
+        ).fetchall()
+        return [_row_to_confirmation(r) for r in rows]
+
 
 def _row_to_user(row: sqlite3.Row) -> User:
     return User(
@@ -716,4 +879,37 @@ def _row_to_entry(row: sqlite3.Row) -> PackageEntry:
         kind=row["kind"],
         sensitivity=row["sensitivity"],
         added_at=row["added_at"],
+    )
+
+
+def _row_to_release(row: sqlite3.Row) -> Release:
+    return Release(
+        release_id=row["release_id"],
+        package_id=row["package_id"],
+        institution_id=row["institution_id"],
+        status=row["status"],
+        created_by=row["created_by"],
+        created_at=row["created_at"],
+        released_at=row["released_at"],
+    )
+
+
+def _row_to_confirmation(row: sqlite3.Row) -> ReleaseConfirmation:
+    return ReleaseConfirmation(
+        confirmation_id=row["confirmation_id"],
+        release_id=row["release_id"],
+        user_id=row["user_id"],
+        role=row["role"],
+        via=row["via"],
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_delegation(row: sqlite3.Row) -> ReleaseDelegation:
+    return ReleaseDelegation(
+        delegation_id=row["delegation_id"],
+        delegate_user_id=row["delegate_user_id"],
+        role=row["role"],
+        created_by=row["created_by"],
+        created_at=row["created_at"],
     )

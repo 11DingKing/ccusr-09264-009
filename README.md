@@ -37,6 +37,17 @@
   失权；角色调整在下次请求鉴权时即时生效。
 - 无权限者看到的清单条目不返回摘要（避免内容指纹本身泄露）。
 
+### 发布法定人数
+- 已签发**通过**的评审包可创建发布；发布委员会按**职责集合**（存于 SQLite
+  的 `release_committee_roles`）逐个角色确认。
+- 法定人数按**角色**而非简单人数统计：职责集合中每个角色都至少被一条确认
+  覆盖才齐备；同一角色被多人重复确认不推进法定人数。
+- 替代确认人只能在**授权范围**内生效：确认某职责须本人持有该角色，或存在
+  针对该角色的替代授权（`release_delegations`），越权确认一律拒绝。
+- 发布接口返回**缺少的角色**：法定人数不足时以 `409 conflict` 回应，
+  `details.missing_roles` 列出缺位角色；发布查询与成功响应同样携带
+  `required_roles` / `confirmed_roles` / `missing_roles`。
+
 ### 并发、幂等与恢复
 - 所有写用例在 `BEGIN IMMEDIATE` 事务内执行；状态推进使用条件 UPDATE
   （`WHERE status = expected`），并发分配/签发下只有一方推进，另一方回放，
@@ -106,9 +117,17 @@ python3 -m service_09252_006.cli verify --db ./data/qe.db [--json]
 | POST | `/v1/requests/{id}/verdict` | 提交 approve/object（object 须先有异议） |
 | POST | `/v1/requests/{id}/cancel` | 取消分配（即时收回敏感访问权） |
 | POST | `/v1/packages/{id}/decision` | 签发 approved/needs_revision/rejected |
+| POST | `/v1/committee/roles` | 定义发布委员会职责集合（整体替换） |
+| GET  | `/v1/committee/roles` | 查看发布法定人数职责集合 |
+| POST | `/v1/committee/delegations` | 授权替代确认人（限定职责范围） |
+| POST | `/v1/releases` | 为已签发通过的包创建发布 |
+| GET  | `/v1/releases/{id}` | 发布状态（含缺位角色） |
+| POST | `/v1/releases/{id}/confirm` | 按职责确认（本人或授权替代） |
+| POST | `/v1/releases/{id}/publish` | 发布；法定人数不足返回缺少的角色 |
 
 评审状态机：`draft → sealed → under_review → decided`；复审包重新走一遍，
-旧包不复活。
+旧包不复活。发布状态机：`pending → released`，仅当职责集合中每个角色
+都被确认覆盖时才能推进。
 
 ## 测试
 
@@ -119,8 +138,9 @@ python3 -m compileall -q service_09252_006 tests
 
 覆盖：内容寻址与版本链、封存不变量、**材料撤回**（封存前后）、后补材料
 只能复审、**最小披露与权限变化**（取消/拒绝/角色调整/跨机构）、
-**跨时区截止**（上海/伦敦/洛杉矶）、异议与签发约束、幂等重放与失败重试、
-多连接**并发复审**、离线核验对字节/清单/评审篡改的检出，以及完整 HTTP
-端到端流程。
+**跨时区截止**（上海/伦敦/洛杉矶）、异议与签发约束、**发布法定人数**
+（按角色统计、替代确认人授权范围与越权拒绝、缺位角色返回）、幂等重放
+与失败重试、多连接**并发复审**、离线核验对字节/清单/评审篡改的检出，
+以及完整 HTTP 端到端流程。
 
 扩展模块覆盖证据、审批、权限、留存、对账与恢复等业务边界。
