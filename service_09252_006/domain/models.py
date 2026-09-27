@@ -92,6 +92,7 @@ class ReviewPackage:
     decision_note: Optional[str]
     review_fingerprint: Optional[str]
     supersedes_package_id: Optional[str]  # 后补材料触发的复审包指向前序包
+    released_at: Optional[str] = None     # 发布法定人数满足后的发布时刻
     entries: list[PackageEntry] = field(default_factory=list)
 
     def is_mutable(self) -> bool:
@@ -125,6 +126,34 @@ class Objection:
     category: str
     detail: str
     created_at: str
+
+
+@dataclass(frozen=True)
+class ReleaseDelegation:
+    """发布确认的替代授权：替代人只能在授予的职责（角色）范围内确认。
+
+    roles 为该替代人可代行的发布职责集合；package_id 为空表示对所有
+    包生效，非空时仅限该包。授权本身记录在 SQLite 中。
+    """
+
+    delegation_id: str
+    substitute_id: str
+    roles: tuple[str, ...]
+    granted_by: str
+    granted_at: str
+    package_id: Optional[str] = None
+
+
+@dataclass
+class ReleaseConfirmation:
+    """发布委员会确认记录。每个【职责角色】每个包至多一条确认。"""
+
+    confirmation_id: str
+    package_id: str
+    role: str                        # 被确认人代表的发布职责角色
+    confirmer_id: str                # 实际确认人（可能是替代人）
+    delegated: bool                  # 是否经替代授权产生
+    confirmed_at: str
 
 
 @dataclass

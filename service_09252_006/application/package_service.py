@@ -343,6 +343,7 @@ class PackageService(Service):
             "decision_note": p.decision_note,
             "review_fingerprint": p.review_fingerprint,
             "supersedes_package_id": p.supersedes_package_id,
+            "released_at": p.released_at,
             "entry_count": len(p.entries),
             "replayed": replayed,
         }

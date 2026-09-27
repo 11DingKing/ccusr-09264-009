@@ -51,6 +51,13 @@ class DeadlineExceededError(ConflictError):
     http_status = 409
 
 
+class QuorumInsufficientError(ConflictError):
+    """发布法定人数不足；details["missing_roles"] 列出尚缺的职责角色。"""
+
+    code = "quorum_insufficient"
+    http_status = 409
+
+
 class IntegrityError(DomainError):
     """离线核验或写入时发现指纹不一致（疑似篡改）。"""
 

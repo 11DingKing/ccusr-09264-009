@@ -16,6 +16,8 @@ from ..domain.models import (
     MaterialVersion,
     Objection,
     PackageEntry,
+    ReleaseConfirmation,
+    ReleaseDelegation,
     ReviewPackage,
     ReviewRequest,
     User,
@@ -139,6 +141,38 @@ class Repository(abc.ABC):
 
     @abc.abstractmethod
     def list_objections_by_package(self, package_id: str) -> list[Objection]: ...
+
+    # ---- 发布法定人数 ----
+    @abc.abstractmethod
+    def list_release_roles(self) -> list[str]:
+        """发布必须凑齐的职责角色集合。"""
+
+    @abc.abstractmethod
+    def set_release_roles(self, roles: list[str], at: str) -> None: ...
+
+    @abc.abstractmethod
+    def insert_release_confirmation(
+        self, confirmation: ReleaseConfirmation
+    ) -> None: ...
+
+    @abc.abstractmethod
+    def list_release_confirmations(
+        self, package_id: str
+    ) -> list[ReleaseConfirmation]: ...
+
+    @abc.abstractmethod
+    def insert_release_delegation(self, delegation: ReleaseDelegation) -> None: ...
+
+    @abc.abstractmethod
+    def list_release_delegations(
+        self, substitute_id: str
+    ) -> list[ReleaseDelegation]: ...
+
+    @abc.abstractmethod
+    def mark_package_released(
+        self, package_id: str, expected_status: str, released_at: str
+    ) -> bool:
+        """条件写入发布时刻；已发布或状态不符时返回 False（并发冲突）。"""
 
     # ---- 审计 ----
     @abc.abstractmethod

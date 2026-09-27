@@ -394,6 +394,67 @@ class ApiHandler(BaseHTTPRequestHandler):
             ),
         )
 
+    # ----------------------------------------------------------- 发布
+    def get_release_roles(self) -> None:
+        actor = self._actor()
+        self._send_json(200, self.services.release.list_release_roles(actor))
+
+    def configure_release_roles(self) -> None:
+        actor = self._actor()
+        body = self._read_json()
+        self._send_json(
+            200,
+            self.services.release.configure_release_roles(
+                actor,
+                roles=body["roles"],
+                idempotency_key=self._idempotency_key(),
+            ),
+        )
+
+    def create_release_delegation(self) -> None:
+        actor = self._actor()
+        body = self._read_json()
+        self._send_json(
+            201,
+            self.services.release.delegate_release(
+                actor,
+                substitute_id=body["substitute_id"],
+                roles=body["roles"],
+                package_id=body.get("package_id"),
+                idempotency_key=self._idempotency_key(),
+            ),
+        )
+
+    def confirm_release(self, package_id: str) -> None:
+        actor = self._actor()
+        body = self._read_json()
+        self._send_json(
+            201,
+            self.services.release.confirm_release(
+                actor,
+                package_id=package_id,
+                role=body.get("role"),
+                idempotency_key=self._idempotency_key(),
+            ),
+        )
+
+    def get_release_status(self, package_id: str) -> None:
+        actor = self._actor()
+        self._send_json(
+            200, self.services.release.get_release_status(actor, package_id)
+        )
+
+    def release_package(self, package_id: str) -> None:
+        actor = self._actor()
+        self._send_json(
+            200,
+            self.services.release.release_package(
+                actor,
+                package_id=package_id,
+                idempotency_key=self._idempotency_key(),
+            ),
+        )
+
 
 # 路由表：方法 -> [(路径模式, 处理方法名)]
 def _routes() -> dict[str, list[tuple[str, str]]]:
@@ -413,6 +474,10 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
         ("/v1/requests/{request_id}/respond", "respond_request"),
         ("/v1/requests/{request_id}/objections", "create_objection"),
         ("/v1/requests/{request_id}/verdict", "submit_verdict"),
+        ("/v1/release/roles", "configure_release_roles"),
+        ("/v1/release/delegations", "create_release_delegation"),
+        ("/v1/packages/{package_id}/release/confirmations", "confirm_release"),
+        ("/v1/packages/{package_id}/release", "release_package"),
     ]
     get = [
         ("/v1/materials/{material_id}", "get_material"),
@@ -420,6 +485,8 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
         ("/v1/packages", "list_packages"),
         ("/v1/packages/{package_id}", "get_package"),
         ("/v1/packages/{package_id}/requests", "list_requests"),
+        ("/v1/packages/{package_id}/release", "get_release_status"),
+        ("/v1/release/roles", "get_release_roles"),
         (
             "/v1/packages/{package_id}/entries/{version_id}/content",
             "download_entry",

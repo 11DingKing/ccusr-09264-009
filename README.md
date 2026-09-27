@@ -110,6 +110,33 @@ python3 -m service_09252_006.cli verify --db ./data/qe.db [--json]
 评审状态机：`draft → sealed → under_review → decided`；复审包重新走一遍，
 旧包不复活。
 
+### 发布法定人数
+
+`decided`（且结论为 `approved`）之后还需**发布**才能上线。发布委员会的
+法定人数**按职责角色统计，而非简单人头数**：
+
+- 必需的职责集合持久化在 SQLite `release_roles` 表（默认
+  `institution_admin` / `quality_authority` / `reviewer`），质量权威可经
+  `POST /v1/release/roles` 整体调整；法定人数只以该集合为口径。
+- 确认记录按“包 × 角色”去重（`release_confirmations`）：同一角色无论多少
+  人确认都只计一票；多人头凑不齐缺位角色。
+- **替代确认人**只能在授权范围内生效：质量权威通过
+  `POST /v1/release/delegations` 授权某人代行指定角色（可限定到单个包），
+  记录在 `release_delegations`。确认人实际可代表的职责为
+  “自身角色 ∩ 职责集合 ∪ 授权角色 ∩ 职责集合（包范围匹配）”；越权确认
+  返回 `403 permission_denied`，不产生确认。
+- 发布接口在法定人数不足时返回 `409 quorum_insufficient`，
+  `details.missing_roles` 列出尚缺的角色；确认接口也逐步回报
+  `confirmed_roles` / `missing_roles`。满足后 `POST .../release` 写入
+  `released_at`，重复发布幂等回放。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET/POST | `/v1/release/roles` | 查看/配置发布法定人数职责集合（POST 质量权威） |
+| POST | `/v1/release/delegations` | 授权替代人在指定角色（可限包）内代确认 |
+| POST | `/v1/packages/{id}/release/confirmations` | 以某职责角色确认发布（可带 role） |
+| GET/POST | `/v1/packages/{id}/release` | 查看发布状态 / 满足法定人数后发布 |
+
 ## 测试
 
 ```bash

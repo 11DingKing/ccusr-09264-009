@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
+from datetime import datetime, timezone
 from typing import Iterator
 
 from ..application.repository import Repository
@@ -22,12 +23,22 @@ from ..domain.models import (
     MaterialVersion,
     Objection,
     PackageEntry,
+    ReleaseConfirmation,
+    ReleaseDelegation,
     ReviewPackage,
     ReviewRequest,
     User,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# 发布法定人数的职责集合：发布必须凑齐这些【角色】，而非简单人头数。
+# 该集合持久化在 SQLite（release_roles 表）中，是法定人数统计的唯一依据。
+DEFAULT_RELEASE_ROLES = (
+    "institution_admin",
+    "quality_authority",
+    "reviewer",
+)
 
 
 class SqliteRepository(Repository):
@@ -51,7 +62,8 @@ class SqliteRepository(Repository):
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version >= SCHEMA_VERSION:
             return
-        # executescript 会自行提交事务；把 user_version 写入放在同一脚本
+        # executescript 会自行提交事务；基础建表全部幂等（IF NOT EXISTS），
+        # 再按 user_version 执行增量迁移，最后写入新版本号。
         self._conn.executescript(
             """
                 CREATE TABLE IF NOT EXISTS users (
@@ -109,7 +121,8 @@ class SqliteRepository(Repository):
                     decision              TEXT,
                     decision_note         TEXT,
                     review_fingerprint    TEXT,
-                    supersedes_package_id TEXT
+                    supersedes_package_id TEXT,
+                    released_at           TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS entries (
@@ -176,8 +189,47 @@ class SqliteRepository(Repository):
                     created_at  TEXT NOT NULL
                 );
 
-                PRAGMA user_version = 1;
+                /* v2：发布法定人数 */
+                CREATE TABLE IF NOT EXISTS release_roles (
+                    role       TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS release_confirmations (
+                    confirmation_id TEXT PRIMARY KEY,
+                    package_id      TEXT NOT NULL REFERENCES packages(package_id),
+                    role            TEXT NOT NULL,
+                    confirmer_id    TEXT NOT NULL,
+                    delegated       INTEGER NOT NULL DEFAULT 0,
+                    confirmed_at    TEXT NOT NULL,
+                    UNIQUE(package_id, role)
+                );
+
+                CREATE TABLE IF NOT EXISTS release_delegations (
+                    delegation_id TEXT PRIMARY KEY,
+                    substitute_id TEXT NOT NULL,
+                    roles_json    TEXT NOT NULL,
+                    package_id    TEXT,
+                    granted_by    TEXT NOT NULL,
+                    granted_at    TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_release_delegations_substitute
+                    ON release_delegations(substitute_id);
             """
+        )
+        if version < 2:
+            self._migrate_release_quorum()
+        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _migrate_release_quorum(self) -> None:
+        """v1 -> v2：为既有库补 released_at 列并植入发布职责集合。"""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(packages)")}
+        if "released_at" not in cols:
+            self._conn.execute("ALTER TABLE packages ADD COLUMN released_at TEXT")
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO release_roles(role, created_at) VALUES(?,?)",
+            [(role, now) for role in DEFAULT_RELEASE_ROLES],
         )
 
     @contextlib.contextmanager
@@ -392,8 +444,8 @@ class SqliteRepository(Repository):
         self._conn.execute(
             "INSERT INTO packages(package_id, institution_id, title, status, created_by,"
             " created_at, sealed_at, manifest_fingerprint, decided_at, decision,"
-            " decision_note, review_fingerprint, supersedes_package_id)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " decision_note, review_fingerprint, supersedes_package_id, released_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 package.package_id,
                 package.institution_id,
@@ -408,6 +460,7 @@ class SqliteRepository(Repository):
                 package.decision_note,
                 package.review_fingerprint,
                 package.supersedes_package_id,
+                package.released_at,
             ),
         )
 
@@ -426,6 +479,7 @@ class SqliteRepository(Repository):
             decision_note=row["decision_note"],
             review_fingerprint=row["review_fingerprint"],
             supersedes_package_id=row["supersedes_package_id"],
+            released_at=row["released_at"],
             entries=[],
         )
         if with_entries:
@@ -497,6 +551,7 @@ class SqliteRepository(Repository):
             "decision",
             "decision_note",
             "review_fingerprint",
+            "released_at",
         }
         sets = ["status = ?"]
         params: list = [new_status]
@@ -626,7 +681,100 @@ class SqliteRepository(Repository):
             for r in rows
         ]
 
-    # ------------------------------------------------------------------ audit
+    # ------------------------------------------------------ 发布法定人数
+    def list_release_roles(self) -> list[str]:
+        """发布必须凑齐的职责角色集合（法定人数的唯一统计口径）。"""
+        rows = self._conn.execute(
+            "SELECT role FROM release_roles ORDER BY role"
+        ).fetchall()
+        return [r["role"] for r in rows]
+
+    def set_release_roles(self, roles: list[str], at: str) -> None:
+        """整体替换发布职责集合（质量权威维护）。"""
+        self._conn.execute("DELETE FROM release_roles")
+        self._conn.executemany(
+            "INSERT INTO release_roles(role, created_at) VALUES(?,?)",
+            [(role, at) for role in roles],
+        )
+
+    def insert_release_confirmation(self, confirmation: ReleaseConfirmation) -> None:
+        self._conn.execute(
+            "INSERT INTO release_confirmations(confirmation_id, package_id, role,"
+            " confirmer_id, delegated, confirmed_at)"
+            " VALUES(?,?,?,?,?,?)"
+            " ON CONFLICT(package_id, role) DO NOTHING",
+            (
+                confirmation.confirmation_id,
+                confirmation.package_id,
+                confirmation.role,
+                confirmation.confirmer_id,
+                int(confirmation.delegated),
+                confirmation.confirmed_at,
+            ),
+        )
+
+    def list_release_confirmations(self, package_id: str) -> list[ReleaseConfirmation]:
+        rows = self._conn.execute(
+            "SELECT * FROM release_confirmations WHERE package_id = ?"
+            " ORDER BY role",
+            (package_id,),
+        ).fetchall()
+        return [
+            ReleaseConfirmation(
+                confirmation_id=r["confirmation_id"],
+                package_id=r["package_id"],
+                role=r["role"],
+                confirmer_id=r["confirmer_id"],
+                delegated=bool(r["delegated"]),
+                confirmed_at=r["confirmed_at"],
+            )
+            for r in rows
+        ]
+
+    def insert_release_delegation(self, delegation: ReleaseDelegation) -> None:
+        self._conn.execute(
+            "INSERT INTO release_delegations(delegation_id, substitute_id, roles_json,"
+            " package_id, granted_by, granted_at) VALUES(?,?,?,?,?,?)",
+            (
+                delegation.delegation_id,
+                delegation.substitute_id,
+                json.dumps(list(delegation.roles), ensure_ascii=False),
+                delegation.package_id,
+                delegation.granted_by,
+                delegation.granted_at,
+            ),
+        )
+
+    def list_release_delegations(self, substitute_id: str) -> list[ReleaseDelegation]:
+        rows = self._conn.execute(
+            "SELECT * FROM release_delegations WHERE substitute_id = ?"
+            " ORDER BY granted_at",
+            (substitute_id,),
+        ).fetchall()
+        return [
+            ReleaseDelegation(
+                delegation_id=r["delegation_id"],
+                substitute_id=r["substitute_id"],
+                roles=tuple(json.loads(r["roles_json"])),
+                package_id=r["package_id"],
+                granted_by=r["granted_by"],
+                granted_at=r["granted_at"],
+            )
+            for r in rows
+        ]
+
+    def mark_package_released(
+        self, package_id: str, expected_status: str, released_at: str
+    ) -> bool:
+        """仅当包未发布（released_at 为空）时写入发布时刻，抢占并发发布。"""
+        cur = self._conn.execute(
+            "UPDATE packages SET released_at = ?"
+            " WHERE package_id = ? AND status = ? AND released_at IS NULL",
+            (released_at, package_id, expected_status),
+        )
+        return cur.rowcount == 1
+
+    # -------------------------------------------------------------- audit
     def insert_audit(self, entry: AuditEntry) -> None:
         self._conn.execute(
             "INSERT INTO audit_log(audit_id, package_id, institution_id, actor_id,"
